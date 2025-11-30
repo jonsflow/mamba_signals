@@ -19,7 +19,7 @@ class DataConfig(BaseModel):
     db_path: Path = Path("ohlc_data.db")
     symbol: str = "SPY"
     timeframe: str = "5m"  # '1m', '5m', or '1d' - 5m has best data coverage
-    sequence_length: int = 128  # larger window for Mamba encoder
+    sequence_length: int = 96  # reduced from 128 to speed up state generation
     train_ratio: float = 0.7  # chronological split
     val_ratio: float = 0.15
     test_ratio: float = 0.15
@@ -29,20 +29,20 @@ class DataConfig(BaseModel):
 class ModelConfig(BaseModel):
     """Mamba encoder architecture configuration."""
     input_dim: int = 5  # OHLCV
-    hidden_dim: int = 256  # larger hidden dimension for GPU
+    hidden_dim: int = 128  # reduced from 256 for faster training
     num_layers: int = 2  # more layers for GPU
     dropout: float = 0.1
-    state_dim: int = 256  # larger output state vector
+    state_dim: int = 128  # reduced from 256
 
 
 class RLConfig(BaseModel):
     """Reinforcement Learning training hyperparameters."""
     # Episode training
-    episodes: int = 100  # number of training episodes
+    episodes: int = 20  # reduced from 100 for faster iteration
     episode_length: int = 100  # candles per episode (not used, uses full data)
 
     # DQN parameters
-    batch_size: int = 32  # reduced from 64 for faster training iterations
+    batch_size: int = 128  # larger batch to keep GPU busy
     learning_rate: float = 1e-3
     gamma: float = 0.99  # discount factor for future rewards
 
@@ -52,7 +52,7 @@ class RLConfig(BaseModel):
     epsilon_decay: float = 0.7  # decay per episode
 
     # Experience replay
-    replay_buffer_size: int = 25000  # reduced from 50000 for faster training
+    replay_buffer_size: int = 50000  # larger buffer with bigger batches
     min_buffer_size: int = 32  # minimum samples before training
 
     # Network updates
