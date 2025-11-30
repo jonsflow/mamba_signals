@@ -148,8 +148,8 @@ class TradingEnvironment:
             self.bars_since_last_action += 1
 
         else:
-            # Invalid action (SELL when no inventory) - penalize it
-            reward = -0.1  # Penalty for invalid action
+            # Invalid action (SELL when no inventory) - just ignore it
+            reward = 0.0
             self.bars_since_last_action += 1
 
         return reward
