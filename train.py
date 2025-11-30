@@ -10,9 +10,9 @@ from tqdm import tqdm
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from config import default_config
 from data_loader import OHLCDataLoader
 from training import Agent, HOLD, BUY, SELL
+from config_loader import default_config
 
 logging.basicConfig(
     level=logging.INFO,
