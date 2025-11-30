@@ -1,4 +1,13 @@
-"""Configuration and hyperparameters for RL training."""
+"""Development configuration for Mac/local testing.
+
+This is the default config.py. Use this for M1/M2/M3 Mac development.
+
+If you want to switch to GPU config:
+  cp src/gpu_config.py src/config.py
+
+To switch back to this:
+  cp src/dev_config.py src/config.py
+"""
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional
