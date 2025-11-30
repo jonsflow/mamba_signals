@@ -32,7 +32,7 @@ class RLConfig(BaseModel):
     episode_length: int = 100  # candles per episode (not used, uses full data)
 
     # DQN parameters
-    batch_size: int = 64  # larger batch for GPU
+    batch_size: int = 32  # reduced from 64 for faster training iterations
     learning_rate: float = 1e-3
     gamma: float = 0.99  # discount factor for future rewards
 
@@ -42,7 +42,7 @@ class RLConfig(BaseModel):
     epsilon_decay: float = 0.7  # decay per episode
 
     # Experience replay
-    replay_buffer_size: int = 50000  # large buffer for GPU training
+    replay_buffer_size: int = 25000  # reduced from 50000 for faster training
     min_buffer_size: int = 32  # minimum samples before training
 
     # Network updates
@@ -58,7 +58,7 @@ class RLConfig(BaseModel):
     share_size: int = 1  # buy/sell 1 share at a time
 
     # Reward configuration preset
-    reward_preset: str = "bars_primary"  # reward function preset to use
+    reward_preset: str = "trading_agent"  # simple P&L baseline - test generalization
 
 
 class Config(BaseModel):
