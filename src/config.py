@@ -13,12 +13,12 @@ class DataConfig(BaseModel):
     train_ratio: float = 0.7  # chronological split
     val_ratio: float = 0.15
     test_ratio: float = 0.15
-    max_samples: Optional[int] = 5000  # Limit data for quick iteration (None = use all, default 5000 for dev)
+    max_samples: Optional[int] = 15000  # Limit data for quick iteration (None = use all, default 5000 for dev)
 
 
 class ModelConfig(BaseModel):
     """Mamba encoder architecture configuration."""
-    input_dim: int = 5  # OHLCV
+    input_dim: int = 5  # OHLCV (Mamba model uses this, Baseline uses price differences)
     hidden_dim: int = 64
     num_layers: int = 1
     dropout: float = 0.1
@@ -58,7 +58,7 @@ class RLConfig(BaseModel):
     share_size: int = 1  # buy/sell 1 share at a time
 
     # Reward configuration preset
-    reward_preset: str = "trading_agent"  # simple PNL baseline
+    reward_preset: str = "simple_delta"  # Simple reward: delta on SELL only
 
 
 class Config(BaseModel):

@@ -29,88 +29,104 @@ class RewardConfig:
     # Trade density penalty (penalize accumulating too many trades)
     trade_density_penalty_multiplier: float = 0.0  # 0 = disabled, >0 = penalty increases with trade count
 
+    # Bars-based reward mechanism (alternative to PNL-based)
+    use_bars_only: bool = False  # If True, ignore price delta and only use bars above/below entry
+    reward_bars_above_entry: float = 0.0  # reward per bar price is above entry (for profitable holds)
+    penalty_bars_below_entry: float = 0.0  # penalty per bar price is below entry (for losing holds)
+
     name: str = "custom"
 
 
 # Preset reward configurations
 REWARD_PRESETS = {
-    "simple_pnl": RewardConfig(
-        name="simple_pnl",
-        buy_reward=-0.01,
-        sell_pnl_multiplier=1.0,  # Full delta reward
-        sell_bars_multiplier=0.0,  # No bonus for bars held
-        sell_transaction_cost=-0.01,  # No transaction cost
-        hold_reward=0.0,
-    ),
-
-    "trading_agent": RewardConfig(
-        name="trading_agent",
+    # Simple delta-only reward (baseline)
+    "simple_delta": RewardConfig(
+        name="simple_delta",
         buy_reward=0.0,
-        sell_pnl_multiplier=1.0,  # Full delta reward (like Trading Agent repo)
+        sell_pnl_multiplier=1.0,  # Full delta reward on sell only
         sell_bars_multiplier=0.0,
         sell_transaction_cost=0.0,
         hold_reward=0.0,
     ),
 
-    "bars_primary": RewardConfig(
-        name="bars_primary",
-        buy_reward=-0.50,  # Heavy penalty for buying
-        sell_pnl_multiplier=0.1,  # Small bonus for profit magnitude
-        sell_bars_multiplier=1.0,  # Primary reward: bars held profitably
-        sell_transaction_cost=0.25,  # Transaction cost penalty
-        hold_reward=0.0,  # No HOLD reward
+    # Delta with transaction costs
+    "with_costs": RewardConfig(
+        name="with_costs",
+        buy_reward=-0.01,  # Small penalty for buying
+        sell_pnl_multiplier=1.0,
+        sell_bars_multiplier=0.0,
+        sell_transaction_cost=-0.01,  # Small penalty for selling
+        hold_reward=0.0,
     ),
 
-    "continuous_feedback": RewardConfig(
-        name="continuous_feedback",
+    # Conservative (discourage frequent trading)
+    "conservative": RewardConfig(
+        name="conservative",
+        buy_reward=-0.25,
+        sell_pnl_multiplier=1.0,
+        sell_bars_multiplier=0.05,  # Small bonus for patience
+        sell_transaction_cost=0.10,
+        hold_reward=0.0,
+    ),
+
+    # Continuous feedback on open position
+    "continuous": RewardConfig(
+        name="continuous",
         buy_reward=0.0,
         sell_pnl_multiplier=0.1,
         sell_bars_multiplier=0.0,
         sell_transaction_cost=0.0,
-        hold_reward=1.0,  # Continuous feedback on position quality
+        hold_reward=1.0,  # Reward/penalty while holding based on position value
     ),
 
-    "conservative_trading": RewardConfig(
-        name="conservative_trading",
-        buy_reward=-0.25,  # Moderate penalty for buying
-        sell_pnl_multiplier=1.0,
-        sell_bars_multiplier=0.05,  # Small bonus for patience
-        sell_transaction_cost=0.10,  # Moderate transaction cost
+    # Bars-based (focus on time above/below entry, not PNL)
+    "bars_only": RewardConfig(
+        name="bars_only",
+        buy_reward=0.0,
+        sell_pnl_multiplier=0.0,  # Ignore price delta
+        sell_bars_multiplier=0.1,
+        sell_transaction_cost=0.0,
         hold_reward=0.0,
+        use_bars_only=True,
+        reward_bars_above_entry=0.05,
+        penalty_bars_below_entry=-0.10,
     ),
 
+    # Direction change constraints
     "min_5bars": RewardConfig(
         name="min_5bars",
         buy_reward=0.0,
-        sell_pnl_multiplier=1.0,  # Full delta reward
+        sell_pnl_multiplier=1.0,
         sell_bars_multiplier=0.0,
         sell_transaction_cost=0.0,
         hold_reward=0.0,
-        min_bars_before_direction_change=5,  # Need 5 bars before flipping buy→sell or sell→buy
-        direction_change_penalty=-0.5,  # Penalty for flipping too soon
-    ),
-
-    "controlled_trading": RewardConfig(
-        name="controlled_trading",
-        buy_reward=0.0,
-        sell_pnl_multiplier=1.0,  # Full delta reward
-        sell_bars_multiplier=0.0,
-        sell_transaction_cost=0.0,
-        hold_reward=0.0,
-        min_bars_before_direction_change=5,  # Need 5 bars before flipping buy→sell or sell→buy
+        min_bars_before_direction_change=5,
         direction_change_penalty=-0.5,
-        max_trades_per_episode=100,  # Max 100 trades (~2 per 70 bars)
-        max_trades_penalty=-1.0,  # Heavy penalty for over-trading
     ),
 
-    "sparse_trading": RewardConfig(
-        name="sparse_trading",
+    # Trade count limits
+    "max_100_trades": RewardConfig(
+        name="max_100_trades",
         buy_reward=0.0,
-        sell_pnl_multiplier=1.0,  # Full delta reward
+        sell_pnl_multiplier=1.0,
         sell_bars_multiplier=0.0,
         sell_transaction_cost=0.0,
         hold_reward=0.0,
-        trade_density_penalty_multiplier=0.01,  # Penalty increases with trade count: -0.01, -0.02, -0.03, etc
+        min_bars_before_direction_change=5,
+        direction_change_penalty=-0.5,
+        max_trades_per_episode=100,
+        max_trades_penalty=-1.0,
+    ),
+
+    # Density penalty (penalize high trade frequency)
+    "sparse": RewardConfig(
+        name="sparse",
+        buy_reward=0.0,
+        sell_pnl_multiplier=1.0,
+        sell_bars_multiplier=0.0,
+        sell_transaction_cost=0.0,
+        hold_reward=0.0,
+        trade_density_penalty_multiplier=0.01,
     ),
 }
 

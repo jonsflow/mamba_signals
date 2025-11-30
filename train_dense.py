@@ -8,6 +8,7 @@ import sys
 import logging
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -77,9 +78,9 @@ class BaselineAgent:
 
         logger.info(f"Baseline agent device: {self.device}")
 
-        # Input dimension: (sequence_length + 1) * 5 (OHLCV)
-        # +1 because we include the current bar, so it's [t-seq_len, ..., t]
-        input_dim = (config.data.sequence_length + 1) * 5
+        # Input dimension: sequence_length (price differences, Trading-Agent style)
+        # We have sequence_length prices, which gives (sequence_length - 1) differences
+        input_dim = config.data.sequence_length - 1
 
         # Networks
         self.model = DenseQNetwork(input_dim, hidden_dim=128).to(self.device)
@@ -176,26 +177,50 @@ class BaselineAgent:
             self.epsilon *= self.epsilon_decay
 
 
-def get_state(data, idx, sequence_length, normalize=True):
-    """Get state tensor from price data."""
-    start_idx = max(0, idx - sequence_length)
-    window = data.iloc[start_idx:idx + 1]
+def sigmoid(x):
+    """Sigmoid normalization for price differences."""
+    try:
+        if x < 0:
+            return 1 - 1 / (1 + np.exp(x))
+        return 1 / (1 + np.exp(-x))
+    except:
+        return 0.5
 
+
+def get_state(data, idx, sequence_length, price_col='close', normalize=True):
+    """Get state tensor using price differences (Trading-Agent style).
+
+    Args:
+        data: DataFrame with OHLCV columns
+        idx: Current index
+        sequence_length: Number of candles to look back
+        price_col: Which price to use ('close' by default)
+        normalize: Whether to normalize with sigmoid
+
+    Returns:
+        State tensor of shape (1, sequence_length-1) - price differences
+    """
+    prices = data[price_col].values
+
+    # Get window of prices
+    start_idx = max(0, idx - sequence_length + 1)
+    window = prices[start_idx:idx + 1]
+
+    # Pad if needed
     if len(window) < sequence_length:
-        padding = np.zeros((sequence_length - len(window), 5))
-        window_vals = np.vstack([padding, window[['open', 'high', 'low', 'close', 'volume']].values])
-    else:
-        window_vals = window[['open', 'high', 'low', 'close', 'volume']].values
+        padding_size = sequence_length - len(window)
+        window = np.concatenate([[window[0]] * padding_size, window])
 
-    if normalize:
-        for i in range(5):
-            col = window_vals[:, i]
-            col_min = col.min()
-            col_max = col.max()
-            if col_max > col_min:
-                window_vals[:, i] = (col - col_min) / (col_max - col_min)
+    # Calculate price differences and normalize
+    state_vals = []
+    for i in range(len(window) - 1):
+        diff = window[i + 1] - window[i]
+        if normalize:
+            diff = sigmoid(diff)
+        state_vals.append(diff)
 
-    state = torch.FloatTensor(window_vals).unsqueeze(0)
+    # Convert to tensor (1, seq_len-1)
+    state = torch.FloatTensor([state_vals])
     return state
 
 
@@ -243,7 +268,7 @@ def split_data_chronologically(data, train_ratio, val_ratio):
 
 
 def train_episode(agent, data, episode_num, total_episodes, config):
-    """Train agent for one episode."""
+    """Train agent for one episode (full dataset = one episode, Trading-Agent style)."""
     agent.env.reset()
     avg_loss = 0.0
     num_buys = 0
@@ -251,19 +276,30 @@ def train_episode(agent, data, episode_num, total_episodes, config):
     losses = []
 
     data_len = len(data)
+    first_iter = True
 
-    with tqdm(total=data_len - config.data.sequence_length, desc=f"Episode {episode_num}/{total_episodes} [TRAIN]", leave=False) as pbar:
-        for t in range(config.data.sequence_length, data_len):
+    with tqdm(total=data_len - 1, desc=f"Episode {episode_num}/{total_episodes} [TRAIN]", leave=False) as pbar:
+        for t in range(data_len - 1):
             state = get_state(data, t, config.data.sequence_length)
-            next_state = get_state(data, t + 1, config.data.sequence_length) if t + 1 < data_len else state
+            next_state = get_state(data, t + 1, config.data.sequence_length)
 
-            action = agent.act(state, is_eval=False)
+            # Force BUY on first iteration (Trading-Agent behavior)
+            if first_iter:
+                action = BUY
+                first_iter = False
+            else:
+                action = agent.act(state, is_eval=False)
 
-            price = data.iloc[t]['close']
+            # Pass all OHLC prices so model can learn full price action
+            bar_data = data.iloc[t]
+            price = bar_data['close']
+            price_open = bar_data['open']
+            price_high = bar_data['high']
+            price_low = bar_data['low']
 
             # Track before step to detect successful trades
             inventory_before = len(agent.env.inventory)
-            reward = agent.env.step(action, price)
+            reward = agent.env.step(action, price, price_open, price_high, price_low)
             inventory_after = len(agent.env.inventory)
 
             # Count actual successful trades separately
@@ -298,22 +334,34 @@ def train_episode(agent, data, episode_num, total_episodes, config):
 
 
 def eval_episode(agent, data, config):
-    """Evaluate agent (greedy, no exploration)."""
+    """Evaluate agent (greedy, no exploration) over full dataset."""
     agent.env.reset()
     num_buys = 0
     num_sells = 0
+    first_iter = True
 
     data_len = len(data)
 
-    for t in range(config.data.sequence_length, data_len):
+    for t in range(data_len - 1):
         state = get_state(data, t, config.data.sequence_length)
-        action = agent.act(state, is_eval=True)
 
-        price = data.iloc[t]['close']
+        # Force BUY on first iteration (Trading-Agent behavior)
+        if first_iter:
+            action = BUY
+            first_iter = False
+        else:
+            action = agent.act(state, is_eval=True)
+
+        # Pass all OHLC prices so model can learn full price action
+        bar_data = data.iloc[t]
+        price = bar_data['close']
+        price_open = bar_data['open']
+        price_high = bar_data['high']
+        price_low = bar_data['low']
 
         # Track before step to detect successful trades
         inventory_before = len(agent.env.inventory)
-        reward = agent.env.step(action, price)
+        reward = agent.env.step(action, price, price_open, price_high, price_low)
         inventory_after = len(agent.env.inventory)
 
         # Count actual successful trades separately
@@ -334,8 +382,17 @@ def eval_episode(agent, data, config):
 
 def main():
     """Main training pipeline for baseline."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Train baseline RL trading agent')
+    parser.add_argument('--episodes', type=int, default=None, help='Number of episodes to train (overrides config)')
+    args = parser.parse_args()
+
     config = default_config
     db_path = Path(__file__).parent / "ohlc_data.db"
+
+    # Override episodes from command line if provided
+    if args.episodes is not None:
+        config.rl.episodes = args.episodes
 
     logger.info("=" * 80)
     logger.info("BASELINE RL TRADING AGENT (Dense Layers) - TRAINING")

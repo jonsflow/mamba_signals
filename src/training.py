@@ -39,7 +39,7 @@ class TradingEnvironment:
         # State tracking
         self.cash = initial_cash
         self.shares_held = 0
-        self.inventory = []  # List of (entry_price, bars_held_profitable)
+        self.inventory = []  # List of (entry_close, entry_open, bars_held_profitable, bars_high_above, bars_low_below, bars_close_above)
         self.total_profit = 0.0
         self.last_action = HOLD  # Track last action for direction change penalty
         self.bars_since_last_action = 0  # Track bars since last buy/sell
@@ -55,7 +55,7 @@ class TradingEnvironment:
         self.bars_since_last_action = 0
         self.total_trades = 0
 
-    def step(self, action: int, price: float) -> float:
+    def step(self, action: int, price: float, price_open: float = None, price_high: float = None, price_low: float = None) -> float:
         """Execute action and return intelligent reward.
 
         Reward system:
@@ -68,11 +68,21 @@ class TradingEnvironment:
 
         Args:
             action: 0=HOLD, 1=BUY, 2=SELL
-            price: Current price
+            price: Current close price
+            price_open: Current open price (optional)
+            price_high: Current high price (optional)
+            price_low: Current low price (optional)
 
         Returns:
             Reward (intelligent based on position state)
         """
+        # Use close as default for all prices if not provided
+        if price_open is None:
+            price_open = price
+        if price_high is None:
+            price_high = price
+        if price_low is None:
+            price_low = price
         reward = 0.0
 
         # Check for direction change penalty (BUY→SELL or SELL→BUY)
@@ -105,7 +115,8 @@ class TradingEnvironment:
         if action == BUY:
             # Buy - only if no position open (1 position max)
             if len(self.inventory) == 0:
-                self.inventory.append((price, 0))  # (entry_price, bars_held_profitably)
+                # Track entry with all price info: (entry_close, entry_open, bars_profitable, bars_high_above, bars_low_below, bars_close_above)
+                self.inventory.append((price, price_open, 0, 0, 0, 0))
                 self.shares_held = 1  # 1 share per position
                 reward = self.reward_config.buy_reward + direction_change_penalty + max_trades_penalty + trade_density_penalty
                 self.last_action = BUY
@@ -118,12 +129,25 @@ class TradingEnvironment:
 
         elif action == SELL and len(self.inventory) > 0:
             # Sell - close position with configurable reward
-            entry_price, bars_profitable = self.inventory.pop(0)  # FIFO
-            delta = price - entry_price
-            # Reward = (bars held * multiplier) + (delta * multiplier) - transaction cost
-            reward = (bars_profitable * self.reward_config.sell_bars_multiplier +
-                      delta * self.reward_config.sell_pnl_multiplier -
-                      self.reward_config.sell_transaction_cost + direction_change_penalty + max_trades_penalty + trade_density_penalty)
+            entry_close, entry_open, bars_profitable, bars_high_above, bars_low_below, bars_close_above = self.inventory.pop(0)  # FIFO
+            delta = price - entry_close
+
+            # Calculate reward based on mechanism (bars-only or PNL-based)
+            if self.reward_config.use_bars_only:
+                # Reward uses all price action data: close above, high touches, low touches
+                # bars_close_above = bars where close ended above entry (profitable closes)
+                # bars_high_above = bars where high touched above entry (bullish pressure)
+                # bars_low_below = bars where low touched below entry (bearish pressure)
+                reward = (bars_close_above * self.reward_config.reward_bars_above_entry +
+                         bars_low_below * self.reward_config.penalty_bars_below_entry +
+                         bars_profitable * self.reward_config.sell_bars_multiplier -
+                         self.reward_config.sell_transaction_cost + direction_change_penalty + max_trades_penalty + trade_density_penalty)
+            else:
+                # Traditional PNL-based: (bars held * multiplier) + (delta * multiplier) - transaction cost
+                reward = (bars_profitable * self.reward_config.sell_bars_multiplier +
+                         delta * self.reward_config.sell_pnl_multiplier -
+                         self.reward_config.sell_transaction_cost + direction_change_penalty + max_trades_penalty + trade_density_penalty)
+
             self.total_profit += delta
             self.shares_held = 0  # No position now
             self.last_action = SELL
@@ -131,15 +155,28 @@ class TradingEnvironment:
             self.total_trades += 1  # Count this trade
 
         elif action == HOLD:
-            # Hold - track bars held profitably for bonus calculation on SELL
+            # Hold - track all price action: close above/below, high touches, low touches
             if len(self.inventory) > 0:
-                # In a position - track profitable bars
-                entry_price, bars_profitable = self.inventory[0]
-                unrealized_pnl = price - entry_price
-                # Track bars held profitably
-                if unrealized_pnl > 0:
-                    self.inventory[0] = (entry_price, bars_profitable + 1)
-                # Reward based on config
+                # In a position - track all price metrics
+                entry_close, entry_open, bars_profitable, bars_high_above, bars_low_below, bars_close_above = self.inventory[0]
+
+                # Track if close ended above entry (profitable closes)
+                if price > entry_close:
+                    bars_profitable += 1
+                    bars_close_above += 1
+
+                # Track if high touched above entry (bullish pressure)
+                if price_high > entry_close:
+                    bars_high_above += 1
+
+                # Track if low touched below entry (bearish pressure)
+                if price_low < entry_close:
+                    bars_low_below += 1
+
+                self.inventory[0] = (entry_close, entry_open, bars_profitable, bars_high_above, bars_low_below, bars_close_above)
+
+                # Reward based on config (unchanged from original)
+                unrealized_pnl = price - entry_close
                 reward = self.reward_config.hold_reward * unrealized_pnl if self.reward_config.hold_reward > 0 else 0.0
             else:
                 # Not in position - no reward for holding cash

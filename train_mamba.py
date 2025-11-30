@@ -4,6 +4,7 @@ import sys
 import logging
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import torch
 from tqdm import tqdm
 
@@ -21,39 +22,29 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def get_state(data, idx, sequence_length, normalize=True):
-    """Get state tensor from price data.
+def get_state(data, idx, sequence_length):
+    """Get state tensor from OHLCV data.
 
     Args:
         data: DataFrame with OHLCV columns
         idx: Current index
         sequence_length: Number of candles to look back
-        normalize: Whether to normalize
 
     Returns:
-        State tensor of shape (1, sequence_length, 5)
+        State tensor of shape (1, sequence_length, 5) for OHLCV
     """
-    start_idx = max(0, idx - sequence_length)
-    window = data.iloc[start_idx:idx + 1]
+    # Get window of OHLCV data
+    start_idx = max(0, idx - sequence_length + 1)
+    window = data.iloc[start_idx:idx + 1][['open', 'high', 'low', 'close', 'volume']].values
 
     # Pad if needed
     if len(window) < sequence_length:
-        padding = np.zeros((sequence_length - len(window), 5))
-        window_vals = np.vstack([padding, window[['open', 'high', 'low', 'close', 'volume']].values])
-    else:
-        window_vals = window[['open', 'high', 'low', 'close', 'volume']].values
-
-    # Normalize (min-max per feature)
-    if normalize:
-        for i in range(5):
-            col = window_vals[:, i]
-            col_min = col.min()
-            col_max = col.max()
-            if col_max > col_min:
-                window_vals[:, i] = (col - col_min) / (col_max - col_min)
+        padding_size = sequence_length - len(window)
+        padding = np.tile(window[0], (padding_size, 1))
+        window = np.vstack([padding, window])
 
     # Convert to tensor (1, seq_len, 5)
-    state = torch.FloatTensor(window_vals).unsqueeze(0)
+    state = torch.FloatTensor(window).unsqueeze(0)
     return state
 
 
@@ -139,12 +130,16 @@ def train_episode(agent, data, episode_num, total_episodes, config):
             # Select action
             action = agent.act(state, is_eval=False)
 
-            # Execute action
-            price = data.iloc[t]['close']
+            # Execute action - pass all OHLC prices so model can learn full price action
+            bar_data = data.iloc[t]
+            price = bar_data['close']
+            price_open = bar_data['open']
+            price_high = bar_data['high']
+            price_low = bar_data['low']
 
             # Track before step to detect successful trades
             inventory_before = len(agent.env.inventory)
-            reward = agent.env.step(action, price)
+            reward = agent.env.step(action, price, price_open, price_high, price_low)
             inventory_after = len(agent.env.inventory)
 
             # Count actual successful trades separately
@@ -210,12 +205,16 @@ def eval_episode(agent, data, config, show_progress=False):
         # Select action (greedy)
         action = agent.act(state, is_eval=True)
 
-        # Execute action
-        price = data.iloc[t]['close']
+        # Execute action - pass all OHLC prices so model can learn full price action
+        bar_data = data.iloc[t]
+        price = bar_data['close']
+        price_open = bar_data['open']
+        price_high = bar_data['high']
+        price_low = bar_data['low']
 
         # Track before step to detect successful trades
         inventory_before = len(agent.env.inventory)
-        reward = agent.env.step(action, price)
+        reward = agent.env.step(action, price, price_open, price_high, price_low)
         inventory_after = len(agent.env.inventory)
 
         # Track results - only count successful trades
@@ -238,8 +237,17 @@ def eval_episode(agent, data, config, show_progress=False):
 
 def main():
     """Main training pipeline."""
+    import argparse
+    parser = argparse.ArgumentParser(description='Train Mamba+DQN RL trading agent')
+    parser.add_argument('--episodes', type=int, default=None, help='Number of episodes to train (overrides config)')
+    args = parser.parse_args()
+
     config = default_config
     db_path = Path(__file__).parent / "ohlc_data.db"
+
+    # Override episodes from command line if provided
+    if args.episodes is not None:
+        config.rl.episodes = args.episodes
 
     logger.info("=" * 80)
     logger.info("MAMBA+DQN RL TRADING AGENT - TRAINING")
@@ -269,10 +277,10 @@ def main():
     with OHLCDataLoader(db_path, config.data) as loader:
         data = loader.get_ohlcv_data(config.data.symbol)
 
-    # Limit data for quick iteration if max_samples is set
-    if config.data.max_samples:
-        data = data.iloc[-config.data.max_samples:].reset_index(drop=True)
-        logger.info(f"Limited to last {config.data.max_samples} candles for iteration")
+    # Limit data for quick iteration (hardcoded to 5000 for fast testing)
+    max_samples = 5000
+    data = data.iloc[-max_samples:].reset_index(drop=True)
+    logger.info(f"Limited to last {max_samples} candles for iteration")
 
     logger.info(f"Loaded {len(data)} candles for {config.data.symbol}")
 
