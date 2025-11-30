@@ -216,9 +216,9 @@ def split_data_chronologically(data, train_ratio, val_ratio):
 def train_episode(agent, data, episode_num, total_episodes, config):
     """Train agent for one episode."""
     agent.env.reset()
-    total_profit = 0.0
     avg_loss = 0.0
-    num_trades = 0
+    num_buys = 0
+    num_sells = 0
     losses = []
 
     data_len = len(data)
@@ -231,12 +231,17 @@ def train_episode(agent, data, episode_num, total_episodes, config):
             action = agent.act(state, is_eval=False)
 
             price = data.iloc[t]['close']
-            reward = agent.env.step(action, price)
 
-            if action in [BUY, SELL]:
-                num_trades += 1
-            if action == SELL:
-                total_profit += reward
+            # Track before step to detect successful trades
+            inventory_before = len(agent.env.inventory)
+            reward = agent.env.step(action, price)
+            inventory_after = len(agent.env.inventory)
+
+            # Count actual successful trades separately
+            if action == BUY and inventory_after > inventory_before:
+                num_buys += 1
+            elif action == SELL and inventory_after < inventory_before:
+                num_sells += 1
 
             done = (t == data_len - 1)
 
@@ -252,6 +257,12 @@ def train_episode(agent, data, episode_num, total_episodes, config):
     if losses:
         avg_loss = np.mean(losses)
 
+    # Use actual total_profit from environment (tracks realized delta)
+    total_profit = agent.env.total_profit
+    # A trade is a complete round trip (buy-sell pair), so count completed trades (sells)
+    num_trades = num_sells
+
+    logger.info(f"  [TRAIN DEBUG] Buys: {num_buys}, Sells: {num_sells}, Open position: {agent.env.shares_held} shares (should be {num_buys - num_sells}), Total profit: ${total_profit:.2f}")
     logger.info(f"Episode {episode_num}/{total_episodes} - Profit: ${total_profit:.2f}, Trades: {num_trades}, Loss: {avg_loss:.4f}, Epsilon: {agent.epsilon:.3f}")
 
     return total_profit, avg_loss, num_trades
@@ -260,8 +271,8 @@ def train_episode(agent, data, episode_num, total_episodes, config):
 def eval_episode(agent, data, config):
     """Evaluate agent (greedy, no exploration)."""
     agent.env.reset()
-    total_profit = 0.0
-    num_trades = 0
+    num_buys = 0
+    num_sells = 0
 
     data_len = len(data)
 
@@ -270,12 +281,24 @@ def eval_episode(agent, data, config):
         action = agent.act(state, is_eval=True)
 
         price = data.iloc[t]['close']
-        reward = agent.env.step(action, price)
 
-        if action in [BUY, SELL]:
-            num_trades += 1
-        if action == SELL:
-            total_profit += reward
+        # Track before step to detect successful trades
+        inventory_before = len(agent.env.inventory)
+        reward = agent.env.step(action, price)
+        inventory_after = len(agent.env.inventory)
+
+        # Count actual successful trades separately
+        if action == BUY and inventory_after > inventory_before:
+            num_buys += 1
+        elif action == SELL and inventory_after < inventory_before:
+            num_sells += 1
+
+    # Use actual total_profit from environment (tracks realized delta)
+    total_profit = agent.env.total_profit
+    # A trade is a complete round trip (buy-sell pair), so count completed trades (sells)
+    num_trades = num_sells
+
+    logger.info(f"  [VAL DEBUG] Buys: {num_buys}, Sells: {num_sells}, Open position: {agent.env.shares_held} shares (should be {num_buys - num_sells}), Total profit: ${total_profit:.2f}")
 
     return total_profit, num_trades
 

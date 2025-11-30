@@ -41,6 +41,9 @@ class TradingEnvironment:
         self.shares_held = 0
         self.inventory = []  # List of (entry_price, bars_held_profitable)
         self.total_profit = 0.0
+        self.last_action = HOLD  # Track last action for direction change penalty
+        self.bars_since_last_action = 0  # Track bars since last buy/sell
+        self.total_trades = 0  # Track total trades this episode
 
     def reset(self):
         """Reset environment to initial state."""
@@ -48,6 +51,9 @@ class TradingEnvironment:
         self.shares_held = 0
         self.inventory = []
         self.total_profit = 0.0
+        self.last_action = HOLD
+        self.bars_since_last_action = 0
+        self.total_trades = 0
 
     def step(self, action: int, price: float) -> float:
         """Execute action and return intelligent reward.
@@ -56,8 +62,9 @@ class TradingEnvironment:
         - BUY: reward = 0 (no immediate feedback)
         - SELL: reward = realized P&L (price_delta)
         - HOLD: reward = unrealized P&L feedback (if in position)
-          - Positive if position is winning (+0.1 per bar above entry)
-          - Negative if position is losing (-0.1 per bar below entry)
+
+        Direction change penalty:
+        - If min_bars_before_direction_change is set, penalize flipping buy→sell or sell→buy too quickly
 
         Args:
             action: 0=HOLD, 1=BUY, 2=SELL
@@ -68,15 +75,46 @@ class TradingEnvironment:
         """
         reward = 0.0
 
+        # Check for direction change penalty (BUY→SELL or SELL→BUY)
+        direction_change_penalty = 0.0
+        if self.reward_config.min_bars_before_direction_change > 0:
+            # Check if this is a direction change
+            is_direction_change = False
+            if action == SELL and self.last_action == BUY:
+                is_direction_change = True
+            elif action == BUY and self.last_action == SELL:
+                is_direction_change = True
+
+            # Apply penalty if direction change too soon
+            if is_direction_change and self.bars_since_last_action < self.reward_config.min_bars_before_direction_change:
+                direction_change_penalty = self.reward_config.direction_change_penalty
+
+        # Check for max trades penalty
+        max_trades_penalty = 0.0
+        if self.reward_config.max_trades_per_episode > 0 and self.total_trades >= self.reward_config.max_trades_per_episode:
+            # Apply penalty if already at/over max trades
+            if action == BUY or action == SELL:
+                max_trades_penalty = self.reward_config.max_trades_penalty
+
+        # Check for trade density penalty (penalty increases with number of trades)
+        trade_density_penalty = 0.0
+        if self.reward_config.trade_density_penalty_multiplier > 0:
+            if action == BUY or action == SELL:
+                trade_density_penalty = -self.reward_config.trade_density_penalty_multiplier * self.total_trades
+
         if action == BUY:
             # Buy - only if no position open (1 position max)
             if len(self.inventory) == 0:
                 self.inventory.append((price, 0))  # (entry_price, bars_held_profitably)
                 self.shares_held = 1  # 1 share per position
-                reward = self.reward_config.buy_reward
+                reward = self.reward_config.buy_reward + direction_change_penalty + max_trades_penalty + trade_density_penalty
+                self.last_action = BUY
+                self.bars_since_last_action = 0
+                self.total_trades += 1  # Count this trade
             else:
                 # Already in position, can't buy
                 reward = 0.0
+                self.bars_since_last_action += 1
 
         elif action == SELL and len(self.inventory) > 0:
             # Sell - close position with configurable reward
@@ -85,9 +123,12 @@ class TradingEnvironment:
             # Reward = (bars held * multiplier) + (delta * multiplier) - transaction cost
             reward = (bars_profitable * self.reward_config.sell_bars_multiplier +
                       delta * self.reward_config.sell_pnl_multiplier -
-                      self.reward_config.sell_transaction_cost)
+                      self.reward_config.sell_transaction_cost + direction_change_penalty + max_trades_penalty + trade_density_penalty)
             self.total_profit += delta
             self.shares_held = 0  # No position now
+            self.last_action = SELL
+            self.bars_since_last_action = 0
+            self.total_trades += 1  # Count this trade
 
         elif action == HOLD:
             # Hold - track bars held profitably for bonus calculation on SELL
@@ -104,9 +145,12 @@ class TradingEnvironment:
                 # Not in position - no reward for holding cash
                 reward = 0.0
 
+            self.bars_since_last_action += 1
+
         else:
-            # Invalid action (SELL when no inventory)
-            pass
+            # Invalid action (SELL when no inventory) - penalize it
+            reward = -0.1  # Penalty for invalid action
+            self.bars_since_last_action += 1
 
         return reward
 

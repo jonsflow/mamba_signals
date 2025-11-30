@@ -28,7 +28,7 @@ class ModelConfig(BaseModel):
 class RLConfig(BaseModel):
     """Reinforcement Learning training hyperparameters."""
     # Episode training
-    episodes: int = 5  # for dev (use 100+ for big system)
+    episodes: int = 100  # for dev (use 100+ for big system)
     episode_length: int = 100  # candles per episode (for dev)
 
     # DQN parameters
@@ -39,7 +39,7 @@ class RLConfig(BaseModel):
     # Exploration
     epsilon: float = 1.0  # initial exploration rate
     epsilon_min: float = 0.01
-    epsilon_decay: float = 0.7  # decay per episode (more aggressive for quick learning)
+    epsilon_decay: float = 0.99  # decay per episode (more aggressive for quick learning)
 
     # Experience replay
     replay_buffer_size: int = 1000  # for dev (use 10000+ for big system)
@@ -58,7 +58,7 @@ class RLConfig(BaseModel):
     share_size: int = 1  # buy/sell 1 share at a time
 
     # Reward configuration preset
-    reward_preset: str = "bars_primary"  # reward function preset to use
+    reward_preset: str = "trading_agent"  # simple PNL baseline
 
 
 class Config(BaseModel):
