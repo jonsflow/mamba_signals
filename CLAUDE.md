@@ -6,12 +6,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with th
 
 **Project**: Mamba-based Deep Q-Learning (DQN) trading agent learning to buy/sell/hold decisions from OHLCV price data.
 
-**Latest Changes**:
+**Latest Session (Nov 30 Evening)**:
+- ✅ Fixed P&L metric contamination (reward penalties were being added to profit)
+- ✅ Fixed trade counting (now counts actual executed round-trips, not action signals)
+- ✅ Added debug output showing Buys/Sells separately with validation check
+- ✅ Removed invalid SELL penalty (-0.1) that was making agent freeze trading
+- ✅ Current baseline: `trading_agent` preset with no penalties
+
+**Previous Changes**:
 - ✅ Implemented configurable reward system with multiple presets
 - ✅ Created GPU-optimized branch (`gpu-training`) for NVIDIA CUDA training
 - ✅ Single position constraint (max 1 open position at a time)
-- ✅ Proportional reward based on bars held profitably vs absolute P&L
-- ✅ Comprehensive README and documentation for both Mac and GPU
 
 **Branches**:
 - `rl-agent-mamba` - Main development (Mac-friendly, small configs)
@@ -194,17 +199,45 @@ python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}'); print(f'M
 - Total: 3-8 hours overnight
 - Memory: 8-10GB VRAM
 
-## Important Notes
+## Important Notes - Metrics & Trade Counting
+
+**Metrics Fixed (Nov 30)**:
+- **P&L Tracking**: Now uses `agent.env.total_profit` (actual realized delta only)
+- **Reward Separation**: Reward signal penalties no longer contaminate profit metrics
+- **Trade Definition**: A trade = complete round-trip (buy-sell pair), counted as `num_sells`
+- **Trade Counting**: Only counts successfully executed trades (inventory actually changed)
+- **Invalid Actions**: SELL with no inventory gets reward=0.0 (ignored, not penalized)
+
+**Debug Output**:
+Both training and validation print:
+```
+[TRAIN/VAL DEBUG] Buys: X, Sells: Y, Open position: Z shares (should be X-Y), Total profit: $P
+```
+This validates that buy/sell accounting is correct (position should equal buys minus sells).
+
+**Reward Presets**:
+- **trading_agent** (current): BUY=0, SELL=delta*1.0, HOLD=0, no penalties
+- **sparse_trading**: Adds trade_density_penalty (makes agent freeze)
+- **min_5bars**: Direction change penalty (needs 5 bars before buy→sell flip)
+- **controlled_trading**: Max trades constraint (100/episode)
+- **bars_primary**: Complex (bars_held_profitable bonus)
+
+## Important Notes - General
 
 - **Single Position**: Agent can hold max 1 position at a time
-- **Reward Structure**: Emphasizes holding winners (bars_profitable) over pure P&L
 - **Overfitting**: Validation profit may diverge from training (normal for RL)
 - **Exploration**: Epsilon starts at 1.0 (random), decays to 0.01 (greedy)
-- **Transaction Cost**: -0.25 per SELL action discourages excessive trading
+- **Current Issue**: Agent makes trades in training but freezes in validation
 
-## Documentation Files
+## Files to Know
 
-- **README.md** - Main documentation (quick start, config, troubleshooting)
-- **GPU_SETUP.md** - Detailed GPU setup and optimization
-- **RL_DESIGN.md** - Architecture and design decisions
-- **RL_REWARD_PROBLEM.md** - Reward engineering analysis and alternatives
+**Key Files**:
+- `train.py` - Mamba+DQN training (both systems)
+- `train_baseline.py` - Dense layer baseline for comparison
+- `src/config.py` - Configuration (shared by both scripts)
+- `src/training.py` - TradingEnvironment, Agent, step/reward logic
+- `src/reward_config.py` - Reward presets
+
+**Documentation**:
+- `README.md` - Main guide (setup, architecture, troubleshooting)
+- `CLAUDE.md` - This file (for Claude Code sessions)
