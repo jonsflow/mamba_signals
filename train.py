@@ -199,6 +199,25 @@ def main():
     logger.info("MAMBA+DQN RL TRADING AGENT - TRAINING")
     logger.info("=" * 80)
 
+    # Print configuration
+    logger.info("\n[CONFIGURATION]")
+    logger.info(f"Data Config:")
+    logger.info(f"  symbol: {config.data.symbol}")
+    logger.info(f"  timeframe: {config.data.timeframe}")
+    logger.info(f"  sequence_length: {config.data.sequence_length}")
+    logger.info(f"  max_samples: {config.data.max_samples}")
+    logger.info(f"Model Config:")
+    logger.info(f"  hidden_dim: {config.model.hidden_dim}")
+    logger.info(f"  num_layers: {config.model.num_layers}")
+    logger.info(f"  state_dim: {config.model.state_dim}")
+    logger.info(f"RL Config:")
+    logger.info(f"  episodes: {config.rl.episodes}")
+    logger.info(f"  batch_size: {config.rl.batch_size}")
+    logger.info(f"  replay_buffer_size: {config.rl.replay_buffer_size}")
+    logger.info(f"  device: {config.rl.device}")
+    logger.info(f"  reward_preset: {config.rl.reward_preset}")
+    logger.info("")
+
     # 1. Load data
     logger.info("\n1. Loading OHLCV data from SQLite...")
     with OHLCDataLoader(db_path, config.data) as loader:
