@@ -1,4 +1,4 @@
-"""Mamba-based sequence model for price prediction."""
+"""Mamba-based sequence encoder for state representation."""
 import math
 from typing import Optional
 import torch
@@ -81,11 +81,11 @@ class MambaBlock(nn.Module):
         return y
 
 
-class MambaForecaster(nn.Module):
-    """Mamba-based sequence forecaster for OHLC price prediction."""
+class MambaEncoder(nn.Module):
+    """Mamba-based sequence encoder for RL state representation."""
 
     def __init__(self, config: ModelConfig):
-        """Initialize forecaster.
+        """Initialize encoder.
 
         Args:
             config: Model configuration
@@ -108,14 +108,8 @@ class MambaForecaster(nn.Module):
             for _ in range(config.num_layers)
         ])
 
-        # Classification head
-        self.dropout = nn.Dropout(config.dropout)
-        self.classifier = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.hidden_dim // 2, config.output_dim)
-        )
+        # Output projection to state dimension
+        self.output_proj = nn.Linear(config.hidden_dim, config.state_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
@@ -124,7 +118,7 @@ class MambaForecaster(nn.Module):
             x: Input tensor of shape (batch, seq_len, input_dim)
 
         Returns:
-            Logits tensor of shape (batch, output_dim)
+            State vector of shape (batch, state_dim)
         """
         # Embed input
         x = self.input_emb(x)  # (batch, seq_len, hidden_dim)
@@ -138,14 +132,13 @@ class MambaForecaster(nn.Module):
         # Pool over sequence dimension (take last state)
         x = x[:, -1, :]  # (batch, hidden_dim)
 
-        # Classification
-        x = self.dropout(x)
-        logits = self.classifier(x)  # (batch, output_dim)
+        # Project to state dimension
+        state = self.output_proj(x)  # (batch, state_dim)
 
-        return logits
+        return state
 
     def get_sequence_representation(self, x: torch.Tensor) -> torch.Tensor:
-        """Get full sequence representation before classification.
+        """Get full sequence representation before final pooling.
 
         Args:
             x: Input tensor of shape (batch, seq_len, input_dim)
@@ -163,43 +156,53 @@ class MambaForecaster(nn.Module):
         return x
 
 
-class MambaLSTMHybrid(nn.Module):
-    """Hybrid Mamba-LSTM model for improved temporal modeling."""
+class DQNHead(nn.Module):
+    """DQN head that takes state vector and outputs Q-values for actions."""
+
+    def __init__(self, state_dim: int, action_dim: int = 3, hidden_dim: int = 64):
+        """Initialize DQN head.
+
+        Args:
+            state_dim: Input state dimension
+            action_dim: Number of actions (3: HOLD, BUY, SELL)
+            hidden_dim: Hidden layer dimension
+        """
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim)
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            state: State vector of shape (batch, state_dim)
+
+        Returns:
+            Q-values of shape (batch, action_dim)
+        """
+        return self.network(state)
+
+
+class DQNAgent(nn.Module):
+    """Complete DQN agent: Mamba encoder + DQN head."""
 
     def __init__(self, config: ModelConfig):
-        """Initialize hybrid model.
+        """Initialize agent.
 
         Args:
             config: Model configuration
         """
         super().__init__()
-        self.config = config
-
-        # Input embedding
-        self.input_emb = nn.Linear(config.input_dim, config.hidden_dim)
-
-        # Mamba layer
-        self.mamba = MambaBlock(config.hidden_dim, config.dropout)
-
-        # LSTM layer for temporal context
-        self.lstm = nn.LSTM(
-            config.hidden_dim,
-            config.hidden_dim,
-            num_layers=config.num_layers - 1,
-            dropout=config.dropout,
-            batch_first=True
-        )
-
-        # Layer norm
-        self.layer_norm = nn.LayerNorm(config.hidden_dim)
-
-        # Classification head
-        self.dropout = nn.Dropout(config.dropout)
-        self.classifier = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
-            nn.ReLU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(config.hidden_dim // 2, config.output_dim)
+        self.encoder = MambaEncoder(config)
+        self.dqn_head = DQNHead(
+            state_dim=config.state_dim,
+            action_dim=3,  # HOLD, BUY, SELL
+            hidden_dim=config.hidden_dim
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -209,41 +212,8 @@ class MambaLSTMHybrid(nn.Module):
             x: Input tensor of shape (batch, seq_len, input_dim)
 
         Returns:
-            Logits tensor of shape (batch, output_dim)
+            Q-values of shape (batch, 3)
         """
-        # Embed input
-        x = self.input_emb(x)
-
-        # Mamba processing
-        x = self.mamba(x)
-
-        # LSTM processing
-        x, _ = self.lstm(x)
-        x = self.layer_norm(x)
-
-        # Take last timestep
-        x = x[:, -1, :]
-
-        # Classification
-        x = self.dropout(x)
-        logits = self.classifier(x)
-
-        return logits
-
-
-def create_model(config: ModelConfig, model_type: str = "mamba") -> nn.Module:
-    """Factory function to create model.
-
-    Args:
-        config: Model configuration
-        model_type: Type of model ("mamba" or "hybrid")
-
-    Returns:
-        Initialized model
-    """
-    if model_type == "mamba":
-        return MambaForecaster(config)
-    elif model_type == "hybrid":
-        return MambaLSTMHybrid(config)
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        state = self.encoder(x)
+        q_values = self.dqn_head(state)
+        return q_values

@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Main training script for Mamba signals model."""
+"""Main RL training script for Mamba+DQN trading agent."""
 import sys
 import logging
 from pathlib import Path
 import numpy as np
 import torch
+from tqdm import tqdm
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from config import Config, default_config
+from config import default_config
 from data_loader import OHLCDataLoader
-from windowing import SequenceWindower, LabelGenerator, split_dataset
-from training import Trainer
-
+from training import Agent, HOLD, BUY, SELL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,111 +21,268 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_state(data, idx, sequence_length, normalize=True):
+    """Get state tensor from price data.
+
+    Args:
+        data: DataFrame with OHLCV columns
+        idx: Current index
+        sequence_length: Number of candles to look back
+        normalize: Whether to normalize
+
+    Returns:
+        State tensor of shape (1, sequence_length, 5)
+    """
+    start_idx = max(0, idx - sequence_length)
+    window = data.iloc[start_idx:idx + 1]
+
+    # Pad if needed
+    if len(window) < sequence_length:
+        padding = np.zeros((sequence_length - len(window), 5))
+        window_vals = np.vstack([padding, window[['open', 'high', 'low', 'close', 'volume']].values])
+    else:
+        window_vals = window[['open', 'high', 'low', 'close', 'volume']].values
+
+    # Normalize (min-max per feature)
+    if normalize:
+        for i in range(5):
+            col = window_vals[:, i]
+            col_min = col.min()
+            col_max = col.max()
+            if col_max > col_min:
+                window_vals[:, i] = (col - col_min) / (col_max - col_min)
+
+    # Convert to tensor (1, seq_len, 5)
+    state = torch.FloatTensor(window_vals).unsqueeze(0)
+    return state
+
+
+def split_data_chronologically(data, train_ratio, val_ratio):
+    """Split data chronologically into train/val/test.
+
+    Args:
+        data: Full dataset
+        train_ratio: Fraction for training
+        val_ratio: Fraction for validation
+
+    Returns:
+        Tuple of (train_data, val_data, test_data)
+    """
+    n = len(data)
+    train_end = int(n * train_ratio)
+    val_end = int(n * (train_ratio + val_ratio))
+
+    train_data = data.iloc[:train_end].reset_index(drop=True)
+    val_data = data.iloc[train_end:val_end].reset_index(drop=True)
+    test_data = data.iloc[val_end:].reset_index(drop=True)
+
+    logger.info(f"Data split: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+
+    return train_data, val_data, test_data
+
+
+def train_episode(agent, data, episode_num, total_episodes, config):
+    """Train agent for one episode.
+
+    Args:
+        agent: Agent instance
+        data: Training data
+        episode_num: Current episode number
+        total_episodes: Total episodes
+        config: Configuration
+
+    Returns:
+        Tuple of (total_profit, avg_loss, num_trades)
+    """
+    agent.env.reset()
+    total_profit = 0.0
+    avg_loss = 0.0
+    num_trades = 0
+    losses = []
+
+    data_len = len(data)
+
+    with tqdm(total=data_len - config.data.sequence_length, desc=f"Episode {episode_num}/{total_episodes} [TRAIN]", leave=False) as pbar:
+        for t in range(config.data.sequence_length, data_len):
+            # Get state
+            state = get_state(data, t, config.data.sequence_length)
+            next_state = get_state(data, t + 1, config.data.sequence_length) if t + 1 < data_len else state
+
+            # Select action
+            action = agent.act(state, is_eval=False)
+
+            # Execute action
+            price = data.iloc[t]['close']
+            reward = agent.env.step(action, price)
+
+            # Track results
+            if action in [BUY, SELL]:
+                num_trades += 1
+            if action == SELL:
+                total_profit += reward
+
+            done = (t == data_len - 1)
+
+            # Store experience
+            agent.remember(state, action, reward, next_state, done)
+
+            # Train if buffer has enough samples
+            if len(agent.memory) >= config.rl.batch_size:
+                loss = agent.train_experience_replay(config.rl.batch_size)
+                if loss > 0:
+                    losses.append(loss)
+
+            pbar.update(1)
+
+    if losses:
+        avg_loss = np.mean(losses)
+
+    logger.info(f"Episode {episode_num}/{total_episodes} - Profit: ${total_profit:.2f}, Trades: {num_trades}, Loss: {avg_loss:.4f}, Epsilon: {agent.epsilon:.3f}")
+
+    return total_profit, avg_loss, num_trades
+
+
+def eval_episode(agent, data, config, show_progress=False):
+    """Evaluate agent (greedy, no exploration).
+
+    Args:
+        agent: Agent instance
+        data: Evaluation data
+        config: Configuration
+        show_progress: Whether to show progress bar
+
+    Returns:
+        Tuple of (total_profit, num_trades, trade_history)
+    """
+    agent.env.reset()
+    total_profit = 0.0
+    num_trades = 0
+    trade_history = []
+
+    data_len = len(data)
+    iterator = range(config.data.sequence_length, data_len)
+
+    if show_progress:
+        iterator = tqdm(iterator, desc="[VAL]", leave=False)
+
+    for t in iterator:
+        # Get state
+        state = get_state(data, t, config.data.sequence_length)
+
+        # Select action (greedy)
+        action = agent.act(state, is_eval=True)
+
+        # Execute action
+        price = data.iloc[t]['close']
+        reward = agent.env.step(action, price)
+
+        # Track results
+        if action == BUY:
+            trade_history.append(('BUY', price))
+            num_trades += 1
+        elif action == SELL:
+            trade_history.append(('SELL', price, reward))
+            total_profit += reward
+            num_trades += 1
+
+        done = (t == data_len - 1)
+
+    return total_profit, num_trades, trade_history
+
+
 def main():
     """Main training pipeline."""
     config = default_config
     db_path = Path(__file__).parent / "ohlc_data.db"
 
     logger.info("=" * 80)
-    logger.info("MAMBA SIGNALS - TRAINING PIPELINE")
+    logger.info("MAMBA+DQN RL TRADING AGENT - TRAINING")
     logger.info("=" * 80)
 
     # 1. Load data
-    logger.info("\n1. Loading OHLC data...")
+    logger.info("\n1. Loading OHLCV data from SQLite...")
     with OHLCDataLoader(db_path, config.data) as loader:
-        data_dict = loader.get_all_symbols_data()
-        summary = loader.get_data_summary()
+        data = loader.get_ohlcv_data(config.data.symbol)
 
-    logger.info(f"Loaded data for {len(data_dict)} symbols")
+    # Limit data for quick iteration if max_samples is set
+    if config.data.max_samples:
+        data = data.iloc[-config.data.max_samples:].reset_index(drop=True)
+        logger.info(f"Limited to last {config.data.max_samples} candles for iteration")
 
-    # 2. Combine all symbols and normalize
-    logger.info("\n2. Normalizing data...")
-    all_windows = []
-    all_labels = []
+    logger.info(f"Loaded {len(data)} candles for {config.data.symbol}")
 
-    for symbol, df in data_dict.items():
-        logger.info(f"Processing {symbol}...")
-
-        # Normalize
-        with OHLCDataLoader(db_path, config.data) as loader:
-            df_norm, scaling_params = loader.normalize_ohlcv(df)
-
-        # Window
-        windower = SequenceWindower(
-            config.data.sequence_length,
-            config.labeling.future_bars
-        )
-        windows, indices = windower.create_windows(df_norm)
-
-        # Label
-        label_gen = LabelGenerator(config.labeling, config.data.sequence_length)
-        labels, valid_mask = label_gen.generate_labels(df, windows, indices)
-
-        all_windows.append(windows)
-        all_labels.append(labels)
-
-        logger.info(f"  Windows: {len(windows)}, Valid: {valid_mask.sum()}")
-
-    # Combine all symbols
-    X = np.concatenate(all_windows, axis=0)
-    y = np.concatenate(all_labels, axis=0)
-
-    logger.info(f"\nCombined dataset:")
-    logger.info(f"  Shape: {X.shape}")
-    logger.info(f"  Labels distribution: {np.bincount(y)}")
-
-    # 3. Split dataset
-    logger.info("\n3. Splitting dataset...")
-    mask = np.ones(len(X), dtype=bool)  # All valid in this case
-    splits = split_dataset(
-        X, y, mask,
-        test_split=config.data.test_split,
-        val_split=config.data.val_split,
-        random_seed=config.training.random_seed
+    # 2. Split data chronologically
+    logger.info("\n2. Splitting data chronologically...")
+    train_data, val_data, test_data = split_data_chronologically(
+        data,
+        config.data.train_ratio,
+        config.data.val_ratio
     )
 
-    X_train, y_train = splits['train']
-    X_val, y_val = splits['val']
-    X_test, y_test = splits['test']
+    # 3. Create agent
+    logger.info("\n3. Creating agent...")
+    agent = Agent(config)
+    model_dir = Path(__file__).parent / "models"
 
-    logger.info(f"  Train: {X_train.shape[0]}, Val: {X_val.shape[0]}, Test: {X_test.shape[0]}")
-    logger.info(f"  Train labels: {np.bincount(y_train)}")
-    logger.info(f"  Val labels: {np.bincount(y_val)}")
-    logger.info(f"  Test labels: {np.bincount(y_test)}")
+    # 4. Training loop
+    logger.info("\n4. Starting training loop...")
+    training_history = {
+        'train_profit': [],
+        'train_loss': [],
+        'train_trades': [],
+        'val_profit': [],
+        'val_trades': []
+    }
 
-    # 4. Train model
-    logger.info("\n4. Training model...")
-    # M1 Mac support: use MPS if available, otherwise CPU
-    if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-        device = torch.device('mps')
-        logger.info(f"  Device: Metal Performance Shaders (M1/M2/M3)")
-    elif torch.cuda.is_available():
-        device = torch.device('cuda')
-        logger.info(f"  Device: CUDA GPU")
-    else:
-        device = torch.device('cpu')
-        logger.info(f"  Device: CPU")
-    logger.info(f"  Model: {config.model}")
+    for episode in tqdm(range(1, config.rl.episodes + 1), desc="Episodes", unit="ep"):
+        # Train
+        train_profit, train_loss, train_trades = train_episode(
+            agent, train_data, episode, config.rl.episodes, config
+        )
+        training_history['train_profit'].append(train_profit)
+        training_history['train_loss'].append(train_loss)
+        training_history['train_trades'].append(train_trades)
 
-    trainer = Trainer(config, model_dir=Path(__file__).parent / "models")
-    trainer.fit((X_train, y_train), (X_val, y_val))
+        # Validate
+        val_profit, val_trades, _ = eval_episode(agent, val_data, config, show_progress=False)
+        training_history['val_profit'].append(val_profit)
+        training_history['val_trades'].append(val_trades)
 
-    # 5. Save results
-    logger.info("\n5. Saving results...")
-    trainer.save_history()
+        # Decay epsilon after episode
+        agent.decay_epsilon()
 
-    # 6. Evaluate on test set
-    logger.info("\n6. Evaluating on test set...")
-    with torch.no_grad():
-        trainer.model.eval()
-        X_test_tensor = torch.FloatTensor(X_test)
-        y_test_tensor = torch.LongTensor(y_test)
+        tqdm.write(f"Episode {episode}/{config.rl.episodes} - Train: ${train_profit:.2f} | Val: ${val_profit:.2f} | Trades: {val_trades} | ε: {agent.epsilon:.3f}")
 
-        logits = trainer.model(X_test_tensor.to(trainer.device))
-        preds = logits.argmax(dim=1)
-        test_acc = (preds.cpu() == y_test_tensor).float().mean().item()
+        # Save checkpoint
+        if episode % config.rl.save_every == 0:
+            agent.save(episode, model_dir)
 
-        logger.info(f"  Test Accuracy: {test_acc:.4f}")
+    # Save final model
+    agent.save(config.rl.episodes, model_dir)
+
+    # 5. Evaluate on test set
+    logger.info("\n5. Evaluating on test set...")
+    test_profit, test_trades, test_history = eval_episode(agent, test_data, config)
+
+    logger.info(f"Test Set Results:")
+    logger.info(f"  Total Profit: ${test_profit:.2f}")
+    logger.info(f"  Total Trades: {test_trades}")
+    logger.info(f"  Trade History:")
+    for trade in test_history[:10]:  # Show first 10 trades
+        if len(trade) == 2:
+            action, price = trade
+            logger.info(f"    {action} @ ${price:.2f}")
+        else:
+            action, price, pnl = trade
+            logger.info(f"    {action} @ ${price:.2f} (P&L: ${pnl:.2f})")
+
+    # Save training history
+    logger.info("\n6. Saving results...")
+    history_path = model_dir / "training_history.json"
+    import json
+    with open(history_path, 'w') as f:
+        json.dump(training_history, f, indent=2)
+    logger.info(f"Saved training history: {history_path}")
 
     logger.info("\n" + "=" * 80)
     logger.info("Training complete!")
