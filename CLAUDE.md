@@ -1,115 +1,210 @@
-# CLAUDE.md
+# CLAUDE.md - Mamba Signals RL Trading Agent
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with this repository.
 
-## Project Overview
+## Current Status (2025-11-30)
 
-**Mamba Signals** is a PyTorch-based sequence model that predicts directional price movements (up/down) using OHLCV (Open, High, Low, Close, Volume) candle data. It implements a Mamba architecture (selective state space model) which provides O(N) sequence processing efficiency compared to O(N²) transformers.
+**Project**: Mamba-based Deep Q-Learning (DQN) trading agent learning to buy/sell/hold decisions from OHLCV price data.
 
-The project is specifically optimized for **M1/M2/M3 MacBooks** using Metal Performance Shaders (MPS) GPU acceleration.
+**Latest Changes**:
+- ✅ Implemented configurable reward system with multiple presets
+- ✅ Created GPU-optimized branch (`gpu-training`) for NVIDIA CUDA training
+- ✅ Single position constraint (max 1 open position at a time)
+- ✅ Proportional reward based on bars held profitably vs absolute P&L
+- ✅ Comprehensive README and documentation for both Mac and GPU
+
+**Branches**:
+- `rl-agent-mamba` - Main development (Mac-friendly, small configs)
+- `gpu-training` - GPU optimized (100 episodes, larger model, full data)
 
 ## Architecture Overview
 
-The system has a clear pipeline structure:
-
 ```
-SQLite Database (ohlc_data.db, 1.3M candles)
+SQLite Database (ohlc_data.db, OHLCV data)
     ↓
-OHLCDataLoader (src/data_loader.py)
+OHLCDataLoader (src/data_loader.py) - Load & normalize
     ↓
-SequenceWindower + LabelGenerator (src/windowing.py)
+Mamba Encoder (src/mamba_model.py) - Encode last N candles
     ↓
-Train/Val/Test Split (src/windowing.py)
+DQN Agent (src/training.py) - Decide BUY/SELL/HOLD
     ↓
-MambaForecaster Model (src/mamba_model.py)
+TradingEnvironment (src/training.py) - Execute action, return reward
     ↓
-Trainer Loop (src/training.py)
+Experience Replay & Training - Learn Q-values
     ↓
-Checkpoint & History (models/)
+Checkpoint & History (models/) - Save models and metrics
 ```
 
 ### Key Components
 
-- **src/data_loader.py**: `OHLCDataLoader` class handles SQLite database connections, loads symbol data, and applies min-max normalization to OHLCV features and log-scale normalization to volume.
+- **src/data_loader.py**: `OHLCDataLoader` loads symbol data from SQLite, applies min-max normalization
 
-- **src/windowing.py**: `SequenceWindower` creates fixed-length (128-candle) sliding windows. `LabelGenerator` labels windows as UP/DOWN based on future price movement (5-bar lookahead, 0.1% threshold by default).
+- **src/mamba_model.py**:
+  - `MambaBlock`: Selective state space layer (O(N) complexity)
+  - `MambaEncoder`: Encodes OHLCV sequences into state vectors
+  - `DQNHead`: Maps state vectors to Q-values for 3 actions (HOLD, BUY, SELL)
+  - `DQNAgent`: Combined encoder + head
 
-- **src/mamba_model.py**: Contains `MambaBlock` (selective state space layer) and `MambaForecaster` (full model with 4 layers + classification head). Also includes `MambaLSTMHybrid` as an alternative architecture.
+- **src/training.py**:
+  - `TradingEnvironment`: Simulates trading environment, executes actions, returns rewards
+  - `Agent`: DQN agent with main/target networks, experience replay, ε-greedy exploration
 
-- **src/training.py**: `Trainer` class orchestrates the training loop with device detection (MPS→CUDA→CPU), checkpointing, and loss/accuracy tracking.
+- **src/reward_config.py**: Reward function presets (bars_primary, trading_agent, continuous_feedback, conservative_trading)
 
-- **src/config.py**: Pydantic-based configuration system. All hyperparameters (batch_size, hidden_dim, epochs, etc.) are defined here using `DataConfig`, `LabelingConfig`, `ModelConfig`, and `TrainingConfig` classes.
+- **src/config.py**: Pydantic configuration with `DataConfig`, `ModelConfig`, `RLConfig`
 
 ### Data
 
-- **Source**: SQLite database with 1.3M+ OHLCV candles from 13 major stocks (AAPL, AMD, AMZN, GOOGL, IBM, META, MSFT, MSTR, NFLX, NVDA, QQQ, SPY, TSLA)
-- **Timeframes**: 1m, 5m, 1d (config defaults to 5m for best data coverage)
-- **File**: 191MB local file (no API calls, fully offline)
+- **Source**: SQLite database with OHLCV candles from multiple stocks (SPY by default)
+- **Timeframes**: 1m, 5m, 1d (config defaults to 5m)
+- **File**: ohlc_data.db (place in project root)
 
-## Common Development Tasks
+## Getting Started on GPU Machine
 
-### Running Training
+**For NVIDIA GPU training overnight**:
+
 ```bash
-python train.py
-```
-This loads all symbols (default: SPY), creates sequences, trains the Mamba model, and saves checkpoints to `models/`.
+# Clone and setup
+git clone https://github.com/jonsflow/mamba_signals.git
+cd mamba_signals
 
-### Modifying Configuration
-Edit `src/config.py` to change:
-- **Hyperparameters**: `batch_size`, `hidden_dim`, `num_layers`, `learning_rate`, `epochs`
-- **Data settings**: `symbols`, `timeframe`, `sequence_length`
-- **Label settings**: `future_bars`, `threshold_pct`
+# Switch to GPU-optimized branch
+git checkout gpu-training
 
-For memory issues on MacBook Air, reduce `batch_size` (16→8) and `hidden_dim` (256→128).
+# Setup environment
+python3 -m venv venv
+source venv/bin/activate
 
-### Memory Optimization Tips
-The project already includes memory-efficient features:
-- MPS device support (Metal Performance Shaders for M-series Macs)
-- Gradient clipping in training loop (src/training.py:91)
-- Configurable batch size and model width
+# Install PyTorch with CUDA (for CUDA 12.1)
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-If training runs out of memory:
-1. Reduce `batch_size` in src/config.py (line 35)
-2. Reduce `hidden_dim` in src/config.py (line 27)
-3. Reduce `num_layers` in src/config.py (line 28)
-4. Reduce number of `symbols` in src/config.py (line 10)
+# Install other dependencies
+pip install numpy pandas pydantic tqdm
 
-### Model Selection
-- **Default (MambaForecaster)**: Pure Mamba architecture, O(N) complexity
-- **Hybrid (MambaLSTMHybrid)**: Mamba + LSTM layers for improved temporal modeling
+# Verify GPU
+python3 -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'Device: {torch.cuda.get_device_name(0)}')"
 
-Change in train.py by modifying the model creation call or in src/mamba_model.py:234 factory function.
+# Run training (will use default config with 100 episodes)
+python3 train.py
 
-### Training Artifacts
-After training completes, check:
-- `models/best_model.pt` - Best validation loss checkpoint
-- `models/final_model.pt` - Final epoch model
-- `models/training_history.json` - Loss/accuracy curves for analysis
-- `models/checkpoint_epoch_*.pt` - Periodic checkpoints every 5 epochs
-
-## Device Detection & MPS
-
-The codebase auto-detects device in src/training.py:32-40:
-1. Checks for MPS (M1/M2/M3 Macs)
-2. Falls back to CUDA if available
-3. Falls back to CPU as last resort
-
-To verify MPS is working:
-```bash
-python3 -c "import torch; print('MPS Available:', torch.backends.mps.is_available())"
+# Monitor GPU
+nvidia-smi -l 1  # In another terminal
 ```
 
-## Testing
+## Running Training
 
-A `tests/` directory exists but appears minimal. Key areas to test when modifying:
-- Data loading and normalization in `OHLCDataLoader`
-- Window and label generation in windowing.py
-- Model forward passes with different batch sizes
-- Training loop with different devices
+```bash
+python3 train.py
+```
+
+This:
+1. Loads OHLCV data from SQLite
+2. Normalizes sequences
+3. Splits into train/val/test
+4. Trains DQN agent for N episodes
+5. Saves checkpoints and metrics to `models/`
+
+## Configuring Training
+
+Edit `src/config.py`:
+
+**For Mac (8GB RAM)**:
+```python
+DataConfig:
+  max_samples = 5000          # Limit data
+  sequence_length = 64        # Shorter window
+
+ModelConfig:
+  hidden_dim = 64             # Smaller model
+  num_layers = 1
+
+RLConfig:
+  episodes = 10               # Quick iteration
+  batch_size = 8              # Small batches
+  replay_buffer_size = 1000
+```
+
+**For NVIDIA GPU (12GB VRAM, 128GB RAM)** - Already set in `gpu-training` branch:
+```python
+DataConfig:
+  max_samples = None          # Use all data
+  sequence_length = 128       # Longer window
+
+ModelConfig:
+  hidden_dim = 256            # Larger model
+  num_layers = 2
+
+RLConfig:
+  episodes = 100              # More training
+  batch_size = 64             # Larger batches
+  replay_buffer_size = 50000
+```
+
+## Reward Presets
+
+Change reward function by editing `src/config.py`:
+
+```python
+RLConfig:
+  reward_preset = "bars_primary"  # Default: bars held + small P&L bonus
+```
+
+Available presets in `src/reward_config.py`:
+- **bars_primary**: BUY=-0.50, SELL=bars+0.1×delta-0.25, HOLD=0
+- **trading_agent**: BUY=0, SELL=delta, HOLD=0 (baseline)
+- **continuous_feedback**: BUY=0, SELL=delta, HOLD=0.1×unrealized_pnl
+- **conservative_trading**: BUY=-0.25, SELL with modest penalties
+
+## Output Files
+
+After training:
+- `models/agent_episode_N.pt` - Checkpoint after episode N
+- `models/training_history.json` - Metrics per episode:
+  ```json
+  {
+    "train_profit": [...],
+    "train_loss": [...],
+    "train_trades": [...],
+    "val_profit": [...],
+    "val_trades": [...]
+  }
+  ```
+
+## Device Detection
+
+The codebase auto-detects device in `src/training.py` Agent.__init__():
+1. Checks for CUDA (NVIDIA GPU)
+2. Falls back to MPS (M1/M2/M3 Macs)
+3. Falls back to CPU
+
+Verify GPU detection:
+```bash
+python3 -c "import torch; print(f'CUDA: {torch.cuda.is_available()}'); print(f'MPS: {torch.backends.mps.is_available()}')"
+```
+
+## Expected Performance
+
+**Mac M1 Pro (batch_size=8, 10 episodes)**:
+- Per episode: 5-10 minutes
+- Total: 1-2 hours
+- Memory: 4-6GB
+
+**NVIDIA GPU (batch_size=64, 100 episodes)**:
+- Per episode: 2-5 minutes
+- Total: 3-8 hours overnight
+- Memory: 8-10GB VRAM
 
 ## Important Notes
 
-- **Batch Size Impact**: M1 Macs typically support batch_size=16 without issues. M1 Air might need batch_size=8.
-- **Training Speed**: ~200-400 samples/sec on M1 Pro GPU; full 50 epochs takes 2-4 hours.
-- **Sequence Length**: Fixed at 128 candles by default; this is embedded in the model architecture and data pipeline.
-- **Labels**: Generated via future price comparison (future_bars=5 lookahead, threshold=0.1%). Neutral samples (price moves <0.1%) are filtered out by default.
+- **Single Position**: Agent can hold max 1 position at a time
+- **Reward Structure**: Emphasizes holding winners (bars_profitable) over pure P&L
+- **Overfitting**: Validation profit may diverge from training (normal for RL)
+- **Exploration**: Epsilon starts at 1.0 (random), decays to 0.01 (greedy)
+- **Transaction Cost**: -0.25 per SELL action discourages excessive trading
+
+## Documentation Files
+
+- **README.md** - Main documentation (quick start, config, troubleshooting)
+- **GPU_SETUP.md** - Detailed GPU setup and optimization
+- **RL_DESIGN.md** - Architecture and design decisions
+- **RL_REWARD_PROBLEM.md** - Reward engineering analysis and alternatives
