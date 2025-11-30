@@ -58,7 +58,13 @@ def get_state(data, idx, sequence_length, normalize=True):
 
 
 def split_data_chronologically(data, train_ratio, val_ratio):
-    """Split data chronologically into train/val/test.
+    """Split data using stratified random sampling within chronological chunks.
+
+    Instead of chronological boundaries (which create distribution mismatch),
+    this divides data into chunks and randomly assigns them to train/val/test
+    while preserving temporal coherence within each split.
+
+    This ensures each split sees the full range of market conditions.
 
     Args:
         data: Full dataset
@@ -69,14 +75,36 @@ def split_data_chronologically(data, train_ratio, val_ratio):
         Tuple of (train_data, val_data, test_data)
     """
     n = len(data)
-    train_end = int(n * train_ratio)
-    val_end = int(n * (train_ratio + val_ratio))
+    num_chunks = 10  # Divide data into 10 chunks
+    chunk_size = n // num_chunks
 
-    train_data = data.iloc[:train_end].reset_index(drop=True)
-    val_data = data.iloc[train_end:val_end].reset_index(drop=True)
-    test_data = data.iloc[val_end:].reset_index(drop=True)
+    # Create chunk indices
+    chunks = []
+    for i in range(num_chunks):
+        start = i * chunk_size
+        end = start + chunk_size if i < num_chunks - 1 else n
+        chunks.append(data.iloc[start:end])
 
-    logger.info(f"Data split: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+    # Shuffle chunks
+    import random
+    random.seed(42)
+    random.shuffle(chunks)
+
+    # Assign chunks to train/val/test based on ratios
+    num_train_chunks = max(1, int(num_chunks * train_ratio))
+    num_val_chunks = max(1, int(num_chunks * val_ratio))
+
+    train_chunks = chunks[:num_train_chunks]
+    val_chunks = chunks[num_train_chunks:num_train_chunks + num_val_chunks]
+    test_chunks = chunks[num_train_chunks + num_val_chunks:]
+
+    # Concatenate and sort by index to maintain temporal coherence
+    train_data = pd.concat(train_chunks, ignore_index=True).sort_index().reset_index(drop=True)
+    val_data = pd.concat(val_chunks, ignore_index=True).sort_index().reset_index(drop=True)
+    test_data = pd.concat(test_chunks, ignore_index=True).sort_index().reset_index(drop=True)
+
+    logger.info(f"Data split (stratified random): train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+    logger.info(f"  Train chunks: {num_train_chunks}/{num_chunks}, Val chunks: {num_val_chunks}/{num_chunks}")
 
     return train_data, val_data, test_data
 
